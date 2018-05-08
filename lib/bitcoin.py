@@ -28,6 +28,7 @@ import base64
 import hmac
 import os
 import json
+import xevan_hash
 
 import ecdsa
 import pyaes
@@ -38,6 +39,52 @@ from .util import print_error, InvalidPassword, assert_bytes, to_bytes, inv_dict
 from . import segwit_addr
 from . import constants
 
+
+
+# Version numbers for BIP32 extended keys
+# standard: xprv, xpub
+XPRV_HEADERS = {
+    'standard': 0x04358394,
+}
+XPUB_HEADERS = {
+    'standard': 0x043587cf,
+}
+
+
+class NetworkConstants:
+
+    @classmethod
+    def set_mainnet(cls):
+        cls.TESTNET = False
+        cls.WIF_PREFIX = 239
+        cls.ADDRTYPE_P2PKH = 140
+        cls.ADDRTYPE_P2SH = 19
+        cls.HEADERS_URL = ''  # TODO headers bootstrap
+        cls.GENESIS = '00000bafbc94add76cb75e2ec92894837288a481e5c005f6563d91623bf8bc2c'
+        cls.DEFAULT_PORTS = {'t': '50001', 's': '50002'}
+        cls.DEFAULT_SERVERS = read_json_dict('servers.json')
+        cls.DRKV_HEADER = 0x3a805837  # drkv
+        cls.DRKP_HEADER = 0x3a8061a0  # drkp
+        XPRV_HEADERS['standard'] = 0x04358394
+        XPUB_HEADERS['standard'] = 0x043587cf
+
+    @classmethod
+    def set_testnet(cls):
+        cls.TESTNET = True
+        cls.WIF_PREFIX = 239
+        cls.ADDRTYPE_P2PKH = 140
+        cls.ADDRTYPE_P2SH = 19
+        cls.HEADERS_URL = ''  # TODO headers bootstrap
+        cls.GENESIS = '00000bafbc94add76cb75e2ec92894837288a481e5c005f6563d91623bf8bc2c'
+        cls.DEFAULT_PORTS = {'t':'51001', 's':'51002'}
+        cls.DEFAULT_SERVERS = read_json_dict('servers_testnet.json')
+        cls.DRKV_HEADER = 0x3a8061a0  # DRKV
+        cls.DRKP_HEADER = 0x3a805837  # DRKP
+        XPRV_HEADERS['standard'] = 0x04358394
+        XPUB_HEADERS['standard'] = 0x043587cf
+
+
+NetworkConstants.set_mainnet()
 
 ################################## transactions
 
