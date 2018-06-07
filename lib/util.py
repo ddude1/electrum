@@ -24,11 +24,13 @@ import binascii
 import os, sys, re, json
 from collections import defaultdict
 from datetime import datetime
+import decimal
 from decimal import Decimal
 import traceback
 import urllib
 import threading
 import hmac
+import stat
 
 from .i18n import _
 
@@ -472,8 +474,21 @@ def format_satoshis(x, num_zeros=0, decimal_point=8, precision=None, is_diff=Fal
         result = " " * (15 - len(result)) + result
     return result
 
+
+FEERATE_PRECISION = 1  # num fractional decimal places for sat/byte fee rates
+_feerate_quanta = Decimal(10) ** (-FEERATE_PRECISION)
+
+
 def format_fee_satoshis(fee, num_zeros=0):
-    return format_satoshis(fee, num_zeros, 0, precision=1)
+    return format_satoshis(fee, num_zeros, 0, precision=FEERATE_PRECISION)
+
+
+def quantize_feerate(fee):
+    """Strip sat/byte fee rate of excess precision."""
+    if fee is None:
+        return None
+    return Decimal(fee).quantize(_feerate_quanta, rounding=decimal.ROUND_HALF_DOWN)
+
 
 def timestamp_to_datetime(timestamp):
     if timestamp is None:
@@ -866,3 +881,12 @@ def export_meta(meta, fileName):
     except (IOError, os.error) as e:
         traceback.print_exc(file=sys.stderr)
         raise FileExportFailed(e)
+
+
+def make_dir(path, allow_symlink=True):
+    """Make directory if it does not yet exist."""
+    if not os.path.exists(path):
+        if not allow_symlink and os.path.islink(path):
+            raise Exception('Dangling link: ' + path)
+        os.mkdir(path)
+        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)

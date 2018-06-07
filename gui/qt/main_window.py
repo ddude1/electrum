@@ -39,7 +39,7 @@ import PyQt5.QtCore as QtCore
 from .exception_window import Exception_Hook
 from PyQt5.QtWidgets import *
 
-from electrum import keystore, simple_config
+from electrum import keystore, simple_config, ecc
 from electrum.bitcoin import COIN, is_address, TYPE_ADDRESS
 from electrum import constants
 from electrum.plugins import run_hook
@@ -49,7 +49,7 @@ from electrum.util import (format_time, format_satoshis, format_fee_satoshis,
                            UserCancelled, NoDynamicFeeEstimates, profiler,
                            export_meta, import_meta, bh2u, bfh, InvalidPassword,
                            base_units, base_units_list, base_unit_name_to_decimal_point,
-                           decimal_point_to_base_unit_name)
+                           decimal_point_to_base_unit_name, quantize_feerate)
 from electrum import Transaction
 from electrum import util, bitcoin, commands, coinchooser
 from electrum import paymentrequest
@@ -733,7 +733,10 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
                 else:
                     icon = QIcon(":icons/status_connected_proxy.png")
         else:
-            text = _("Not connected")
+            if self.network.proxy:
+                text = "{} ({})".format(_("Not connected"), _("proxy enabled"))
+            else:
+                text = _("Not connected")
             icon = QIcon(":icons/status_disconnected.png")
 
         self.tray.setToolTip("%s (%s)" % (text, self.wallet.basename()))
@@ -1102,7 +1105,8 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
                 self.config.set_key('fee_per_kb', fee_rate, False)
 
             if fee_rate:
-                self.feerate_e.setAmount(fee_rate // 1000)
+                fee_rate = Decimal(fee_rate)
+                self.feerate_e.setAmount(quantize_feerate(fee_rate / 1000))
             else:
                 self.feerate_e.setAmount(None)
             self.fee_e.setModified(False)
@@ -1334,12 +1338,12 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
             if freeze_feerate or self.fee_slider.is_active():
                 displayed_feerate = self.feerate_e.get_amount()
                 if displayed_feerate:
-                    displayed_feerate = displayed_feerate // 1000
+                    displayed_feerate = quantize_feerate(displayed_feerate)
                 else:
                     # fallback to actual fee
-                    displayed_feerate = fee // size if fee is not None else None
+                    displayed_feerate = quantize_feerate(fee / size) if fee is not None else None
                     self.feerate_e.setAmount(displayed_feerate)
-                displayed_fee = displayed_feerate * size if displayed_feerate is not None else None
+                displayed_fee = round(displayed_feerate * size) if displayed_feerate is not None else None
                 self.fee_e.setAmount(displayed_fee)
             else:
                 if freeze_fee:
@@ -1349,14 +1353,14 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
                     displayed_fee = fee
                     self.fee_e.setAmount(displayed_fee)
                 displayed_fee = displayed_fee if displayed_fee else 0
-                displayed_feerate = displayed_fee // size if displayed_fee is not None else None
+                displayed_feerate = quantize_feerate(displayed_fee / size) if displayed_fee is not None else None
                 self.feerate_e.setAmount(displayed_feerate)
 
             # show/hide fee rounding icon
             feerounding = (fee - displayed_fee) if fee else 0
-            self.set_feerounding_text(feerounding)
+            self.set_feerounding_text(int(feerounding))
             self.feerounding_icon.setToolTip(self.feerounding_text)
-            self.feerounding_icon.setVisible(bool(feerounding))
+            self.feerounding_icon.setVisible(abs(feerounding) >= 1)
 
             if self.is_max:
                 amount = tx.output_value()
@@ -1434,8 +1438,8 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         if self.is_send_fee_frozen():
             fee_estimator = self.fee_e.get_amount()
         elif self.is_send_feerate_frozen():
-            amount = self.feerate_e.get_amount()
-            amount = 0 if amount is None else amount
+            amount = self.feerate_e.get_amount()  # sat/byte feerate
+            amount = 0 if amount is None else amount * 1000  # sat/kilobyte feerate
             fee_estimator = partial(
                 simple_config.SimpleConfig.estimate_fee_for_feerate, amount)
         else:
@@ -1584,8 +1588,6 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
             # can sign directly
             task = partial(Transaction.sign, tx, self.tx_external_keypairs)
         else:
-            # call hook to see if plugin needs gui interaction
-            run_hook('sign_tx', self, tx)
             task = partial(self.wallet.sign_transaction, tx, password)
         WaitingDialog(self, _('Signing transaction...'), task,
                       on_signed, on_failed)
@@ -1598,7 +1600,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
             if pr and pr.has_expired():
                 self.payment_request = None
                 return False, _("Payment request has expired")
-            status, msg =  self.network.broadcast(tx)
+            status, msg = self.network.broadcast_transaction(tx)
             if pr and status is True:
                 self.invoices.set_paid(pr, tx.txid())
                 self.invoices.save()
@@ -1774,7 +1776,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         return self.create_list_tab(l)
 
     def remove_address(self, addr):
-        if self.question(_("Do you want to remove")+" %s "%addr +_("from your wallet?")):
+        if self.question(_("Do you want to remove {} from your wallet?").format(addr)):
             self.wallet.delete_address(addr)
             self.need_update.set()  # history, addresses, coins
             self.clear_receive_tab()
@@ -2078,7 +2080,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         self.gui_object.daemon.stop_wallet(wallet_path)
         self.close()
         os.unlink(wallet_path)
-        self.show_error("Wallet removed:" + basename)
+        self.show_error(_("Wallet removed: {}").format(basename))
 
     @protected
     def show_seed_dialog(self, password):
@@ -2175,7 +2177,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         try:
             # This can throw on invalid base64
             sig = base64.b64decode(str(signature.toPlainText()))
-            verified = bitcoin.verify_message(address, sig, message)
+            verified = ecc.verify_message_with_address(address, sig, message)
         except Exception as e:
             verified = False
         if verified:
@@ -2241,7 +2243,8 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         message = message_e.toPlainText()
         message = message.encode('utf-8')
         try:
-            encrypted = bitcoin.encrypt_message(message, pubkey_e.text())
+            public_key = ecc.ECPubkey(bfh(pubkey_e.text()))
+            encrypted = public_key.encrypt_message(message)
             encrypted_e.setText(encrypted.decode('ascii'))
         except BaseException as e:
             traceback.print_exc(file=sys.stdout)
@@ -2356,7 +2359,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         if ok and txid:
             txid = str(txid).strip()
             try:
-                r = self.network.synchronous_get(('blockchain.transaction.get',[txid]))
+                r = self.network.get_transaction(txid)
             except BaseException as e:
                 self.show_message(str(e))
                 return
@@ -3166,17 +3169,21 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         self.show_transaction(new_tx, tx_label)
 
     def save_transaction_into_wallet(self, tx):
+        win = self.top_level_window()
         try:
             if not self.wallet.add_transaction(tx.txid(), tx):
-                self.show_error(_("Transaction could not be saved.") + "\n" +
-                                       _("It conflicts with current history."))
+                win.show_error(_("Transaction could not be saved.") + "\n" +
+                               _("It conflicts with current history."))
                 return False
         except AddTransactionException as e:
-            self.show_error(e)
+            win.show_error(e)
             return False
         else:
             self.wallet.save_transactions(write=True)
             # need to update at least: history_list, utxo_list, address_list
             self.need_update.set()
-            self.msg_box(QPixmap(":icons/offline_tx.png"), None, _('Success'), _("Transaction added to wallet history"))
+            msg = (_("Transaction added to wallet history.") + '\n\n' +
+                   _("Note: this is an offline transaction, if you want the network "
+                     "to see it, you need to broadcast it."))
+            win.msg_box(QPixmap(":icons/offline_tx.png"), None, _('Success'), msg)
             return True

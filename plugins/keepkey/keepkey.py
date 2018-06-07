@@ -78,6 +78,7 @@ class KeepKeyPlugin(HW_PluginBase):
     libraries_URL = 'https://github.com/keepkey/python-keepkey'
     minimum_firmware = (1, 0, 0)
     keystore_class = KeepKey_KeyStore
+    SUPPORTED_XTYPES = ('standard', )
 
     MAX_LABEL_LEN = 32
 
@@ -180,19 +181,26 @@ class KeepKeyPlugin(HW_PluginBase):
             t = threading.Thread(target=self._initialize_device_safe, args=(settings, method, device_id, wizard, handler))
             t.setDaemon(True)
             t.start()
-            wizard.loop.exec_()
+            exit_code = wizard.loop.exec_()
+            if exit_code != 0:
+                # this method (initialize_device) was called with the expectation
+                # of leaving the device in an initialized state when finishing.
+                # signal that this is not the case:
+                raise UserCancelled()
         wizard.choice_dialog(title=_('Initialize Device'), message=msg, choices=choices, run_next=f)
 
     def _initialize_device_safe(self, settings, method, device_id, wizard, handler):
+        exit_code = 0
         try:
             self._initialize_device(settings, method, device_id, wizard, handler)
         except UserCancelled:
-            pass
+            exit_code = 1
         except BaseException as e:
             traceback.print_exc(file=sys.stderr)
             handler.show_error(str(e))
+            exit_code = 1
         finally:
-            wizard.loop.exit(0)
+            wizard.loop.exit(exit_code)
 
     def _initialize_device(self, settings, method, device_id, wizard, handler):
         item, label, pin_protection, passphrase_protection = settings
@@ -235,8 +243,8 @@ class KeepKeyPlugin(HW_PluginBase):
         client.used()
 
     def get_xpub(self, device_id, derivation, xtype, wizard):
-        if xtype not in ('standard',):
-            raise ScriptTypeNotSupported(_('This type of script is not supported with KeepKey.'))
+        if xtype not in self.SUPPORTED_XTYPES:
+            raise ScriptTypeNotSupported(_('This type of script is not supported with {}.').format(self.device))
         devmgr = self.device_manager()
         client = devmgr.client_by_id(device_id)
         client.handler = wizard
@@ -327,7 +335,7 @@ class KeepKeyPlugin(HW_PluginBase):
             txinputtype.prev_hash = prev_hash
             txinputtype.prev_index = prev_index
 
-            if 'scriptSig' in txin:
+            if txin.get('scriptSig') is not None:
                 script_sig = bfh(txin['scriptSig'])
                 txinputtype.script_sig = script_sig
 
